@@ -32,10 +32,10 @@ import java.util.Random;
 public class FusedLocationProvider implements LocationProvider {
   private final ReactApplicationContext context;
   private final FusedLocationProviderClient fusedLocationProviderClient;
-  private final LocationChangeListener locationChangeListener;
   private final SettingsClient settingsClient;
 
   private int activityRequestCode;
+  private LocationChangeListener locationChangeListener;
   private LocationOptions locationOptions;
   private LocationRequest locationRequest;
 
@@ -43,10 +43,7 @@ public class FusedLocationProvider implements LocationProvider {
   private final LocationCallback locationCallback = new LocationCallback() {
     @Override
     public void onLocationResult(LocationResult locationResult) {
-      locationChangeListener.onLocationChange(
-        FusedLocationProvider.this,
-        locationResult.getLastLocation()
-      );
+      locationChangeListener.onLocationChange(locationResult.getLastLocation());
 
       if (isSingleUpdate) {
         timeoutHandler.removeCallbacks(timeoutRunnable);
@@ -60,7 +57,6 @@ public class FusedLocationProvider implements LocationProvider {
         !LocationUtils.isLocationEnabled(context)
       ) {
         locationChangeListener.onLocationError(
-          FusedLocationProvider.this,
           LocationError.POSITION_UNAVAILABLE,
           "Unable to retrieve location."
         );
@@ -71,26 +67,22 @@ public class FusedLocationProvider implements LocationProvider {
   private final Runnable timeoutRunnable = new Runnable() {
     @Override
     public void run() {
-      locationChangeListener.onLocationError(
-        FusedLocationProvider.this,
-        LocationError.TIMEOUT,
-        null
-      );
+      locationChangeListener.onLocationError(LocationError.TIMEOUT, null);
       fusedLocationProviderClient.removeLocationUpdates(locationCallback);
     }
   };
 
-  public FusedLocationProvider(ReactApplicationContext context, LocationChangeListener locationChangeListener) {
+  public FusedLocationProvider(ReactApplicationContext context) {
     this.context = context;
     this.fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(context);
-    this.locationChangeListener = locationChangeListener;
     this.settingsClient = LocationServices.getSettingsClient(context);
   }
 
   @SuppressLint("MissingPermission")
   @Override
-  public void getCurrentLocation(final LocationOptions locationOptions) {
+  public void getCurrentLocation(final LocationOptions locationOptions, final LocationChangeListener locationChangeListener) {
     this.isSingleUpdate = true;
+    this.locationChangeListener = locationChangeListener;
     this.locationOptions = locationOptions;
     this.locationRequest = buildLocationRequest(locationOptions);
 
@@ -102,7 +94,7 @@ public class FusedLocationProvider implements LocationProvider {
             LocationUtils.getLocationAge(location) < locationOptions.getMaximumAge()
           ) {
             Log.i(RNFusedLocationModule.TAG, "returning cached location.");
-            locationChangeListener.onLocationChange(FusedLocationProvider.this, location);
+            locationChangeListener.onLocationChange(location);
             return;
           }
 
@@ -134,19 +126,17 @@ public class FusedLocationProvider implements LocationProvider {
     if (forceRequestLocation && locationEnabled) {
       startLocationUpdates();
     } else {
-      locationChangeListener.onLocationError(
-        FusedLocationProvider.this,
-        locationEnabled ? LocationError.SETTINGS_NOT_SATISFIED : LocationError.POSITION_UNAVAILABLE,
-        null
-      );
+      LocationError error = !forceRequestLocation ? LocationError.SETTINGS_NOT_SATISFIED : LocationError.POSITION_UNAVAILABLE;
+      locationChangeListener.onLocationError(error, null);
     }
 
     return true;
   }
 
   @Override
-  public void requestLocationUpdates(LocationOptions locationOptions) {
+  public void requestLocationUpdates(LocationOptions locationOptions, final LocationChangeListener locationChangeListener) {
     this.isSingleUpdate = false;
+    this.locationChangeListener = locationChangeListener;
     this.locationOptions = locationOptions;
     this.locationRequest = buildLocationRequest(locationOptions);
     checkLocationSettings();
@@ -158,13 +148,10 @@ public class FusedLocationProvider implements LocationProvider {
   }
 
   private LocationRequest buildLocationRequest(LocationOptions options) {
-    LocationRequest locationRequest = new LocationRequest();
-    int priority = getLocationPriority(options.getAccuracy());
-
-    locationRequest.setPriority(priority)
-      .setInterval(options.getInterval())
-      .setFastestInterval(options.getFastestInterval())
-      .setSmallestDisplacement(isSingleUpdate ? 0 : options.getDistanceFilter());
+    LocationRequest locationRequest = LocationRequest.create()
+    .setPriority(LocationRequest.PRIORITY_LOW_POWER)
+    .setInterval(10000)
+    .setFastestInterval(5000);
 
     return locationRequest;
   }
@@ -188,21 +175,8 @@ public class FusedLocationProvider implements LocationProvider {
 
           switch (exception.getStatusCode()) {
             case LocationSettingsStatusCodes.RESOLUTION_REQUIRED:
-              boolean showLocationDialog = locationOptions.isShowLocationDialog();
-              boolean forceRequestLocation = locationOptions.isForceRequestLocation();
-              boolean locationEnabled = LocationUtils.isLocationEnabled(context);
-
-              if (!showLocationDialog) {
-                if (forceRequestLocation && locationEnabled) {
-                  startLocationUpdates();
-                } else {
-                  locationChangeListener.onLocationError(
-                    FusedLocationProvider.this,
-                    locationEnabled ? LocationError.SETTINGS_NOT_SATISFIED : LocationError.POSITION_UNAVAILABLE,
-                    null
-                  );
-                }
-
+              if (!locationOptions.isShowLocationDialog()) {
+                locationChangeListener.onLocationError(LocationError.SETTINGS_NOT_SATISFIED, null);
                 break;
               }
 
@@ -212,7 +186,6 @@ public class FusedLocationProvider implements LocationProvider {
 
                 if (activity == null) {
                   locationChangeListener.onLocationError(
-                    FusedLocationProvider.this,
                     LocationError.INTERNAL_ERROR,
                     "Tried to open location dialog while not attached to an Activity."
                   );
@@ -221,12 +194,10 @@ public class FusedLocationProvider implements LocationProvider {
 
                 activityRequestCode = getActivityRequestCode();
                 resolvable.startResolutionForResult(activity, activityRequestCode);
-              } catch (IntentSender.SendIntentException | ClassCastException sie) {
-                locationChangeListener.onLocationError(
-                  FusedLocationProvider.this,
-                  LocationError.INTERNAL_ERROR,
-                  null
-                );
+              } catch (IntentSender.SendIntentException sie) {
+                locationChangeListener.onLocationError(LocationError.INTERNAL_ERROR, null);
+              } catch (ClassCastException cce) {
+                locationChangeListener.onLocationError(LocationError.INTERNAL_ERROR, null);
               }
 
               break;
@@ -238,11 +209,7 @@ public class FusedLocationProvider implements LocationProvider {
                 break;
               }
             default:
-              locationChangeListener.onLocationError(
-                FusedLocationProvider.this,
-                LocationError.SETTINGS_NOT_SATISFIED,
-                null
-              );
+              locationChangeListener.onLocationError(LocationError.SETTINGS_NOT_SATISFIED, null);
               break;
           }
         }
@@ -271,7 +238,7 @@ public class FusedLocationProvider implements LocationProvider {
 
   @SuppressLint("MissingPermission")
   private void startLocationUpdates() {
-    fusedLocationProviderClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper());
+    fusedLocationProviderClient.requestLocationUpdates(locationRequest, locationCallback, null);
 
     if (isSingleUpdate) {
       long timeout = locationOptions.getTimeout();
